@@ -80,7 +80,6 @@ class _HomePageState extends State<HomePage> {
       _connection = conn;
       _rxBuf = '';
 
-      // ESP32'dan kelayotgan ma'lumotlarni o'qish (real-time vaqt + javoblar)
       conn.input?.listen(_onData, onDone: () {
         _connection = null;
         if (mounted) {
@@ -113,10 +112,8 @@ class _HomePageState extends State<HomePage> {
   void _handleLine(String line) {
     if (!mounted) return;
     if (line.startsWith('CT ')) {
-      // ESP32'ning joriy vaqti (har 100ms da keladi)
       setState(() => _deviceTime = line.substring(3));
     } else {
-      // Buyruq javoblari va xabarlar
       setState(() => _status = line);
     }
   }
@@ -176,20 +173,28 @@ class _HomePageState extends State<HomePage> {
     _setStatus('Delay yuborildi: $ms ms');
   }
 
-  void _sendWifi() {
-    final ssid = _ssidCtrl.text.trim();
-    final pass = _passCtrl.text.trim();
-    if (ssid.isEmpty) {
-      _setStatus('WiFi nomini kiriting');
-      return;
-    }
-    if (ssid.contains(';')) {
-      _setStatus('WiFi nomida ";" belgisi bo\'lmasligi kerak');
-      return;
-    }
-    _sendRaw('W $ssid;$pass');
-    _setStatus(
-        'WiFi yuborildi. ESP32 qayta ishga tushadi — 10 soniyadan keyin qayta ulaning.');
+  // ---------- WiFi sahifasi ----------
+
+  void _openWifiPage() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => WifiPage(
+          ssidCtrl: _ssidCtrl,
+          passCtrl: _passCtrl,
+          connected: _connected,
+          onSaveAndSync: (ssid, pass) {
+            _sendRaw('W $ssid;$pass');
+            _setStatus(
+                'WiFi yuborildi. ESP32 qayta ishga tushib vaqtni sinxronlaydi — 10 soniyadan keyin qayta ulaning.');
+          },
+          onSyncOnly: () {
+            _sendRaw('SYNC');
+            _setStatus(
+                'Sinxronlash boshlandi. ESP32 qayta ishga tushadi — 10 soniyadan keyin qayta ulaning.');
+          },
+        ),
+      ),
+    );
   }
 
   // ---------- Yordamchi ----------
@@ -228,7 +233,16 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('ESP32 Alarm')),
+      appBar: AppBar(
+        title: const Text('ESP32 Alarm'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.wifi),
+            tooltip: 'WiFi sozlamalari',
+            onPressed: _openWifiPage,
+          ),
+        ],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -386,16 +400,87 @@ class _HomePageState extends State<HomePage> {
               'Masalan: 350 -> 21:29:59.890 + 0.350 >= 21:30:00.001 da signal.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
-            const SizedBox(height: 32),
-            const Divider(),
-            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
-            // WiFi sozlamalari
-            Text('WiFi sozlamalari (ESP32 uchun):',
+// ================= WiFi sahifasi =================
+
+class WifiPage extends StatelessWidget {
+  final TextEditingController ssidCtrl;
+  final TextEditingController passCtrl;
+  final bool connected;
+  final void Function(String ssid, String pass) onSaveAndSync;
+  final VoidCallback onSyncOnly;
+
+  const WifiPage({
+    super.key,
+    required this.ssidCtrl,
+    required this.passCtrl,
+    required this.connected,
+    required this.onSaveAndSync,
+    required this.onSyncOnly,
+  });
+
+  void _save(BuildContext context) {
+    final ssid = ssidCtrl.text.trim();
+    final pass = passCtrl.text.trim();
+    if (ssid.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WiFi nomini kiriting')));
+      return;
+    }
+    if (ssid.contains(';')) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('WiFi nomida ";" belgisi bo\'lmasligi kerak')));
+      return;
+    }
+    onSaveAndSync(ssid, pass);
+    Navigator.of(context).pop();
+  }
+
+  void _sync(BuildContext context) {
+    onSyncOnly();
+    Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('WiFi sozlamalari')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!connected)
+              Card(
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text(
+                      'Bluetooth ulanmagan! Avval asosiy sahifada ESP32 ga ulaning.'),
+                ),
+              ),
+            if (!connected) const SizedBox(height: 16),
+
+            Text('WiFi orqali vaqt sinxronlash',
                 style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
+            Text(
+              'ESP32 shu WiFi orqali time.uzex.uz serveridan aniq vaqtni olib, '
+              'xotirasiga saqlaydi va shu vaqtdan hisoblashda foydalanadi. '
+              'WiFi ma\'lumotlari ESP32 xotirasida saqlanadi — keyingi safar '
+              'faqat "Qayta sinxronlash" ni bossangiz kifoya.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 24),
+
             TextField(
-              controller: _ssidCtrl,
+              controller: ssidCtrl,
               decoration: const InputDecoration(
                 labelText: 'WiFi nomi (SSID)',
                 border: OutlineInputBorder(),
@@ -404,7 +489,7 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 12),
             TextField(
-              controller: _passCtrl,
+              controller: passCtrl,
               obscureText: true,
               decoration: const InputDecoration(
                 labelText: 'WiFi paroli',
@@ -412,16 +497,25 @@ class _HomePageState extends State<HomePage> {
                 prefixIcon: Icon(Icons.lock_outline),
               ),
             ),
-            const SizedBox(height: 12),
-            FilledButton.tonalIcon(
-              onPressed: _connected ? _sendWifi : null,
-              icon: const Icon(Icons.send),
-              label: const Text('WiFi ma\'lumotlarini yuborish'),
+            const SizedBox(height: 16),
+
+            FilledButton.icon(
+              onPressed: connected ? () => _save(context) : null,
+              icon: const Icon(Icons.sync),
+              label: const Text('Saqlash va vaqtni sinxronlash'),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 12),
+
+            OutlinedButton.icon(
+              onPressed: connected ? () => _sync(context) : null,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Qayta sinxronlash (saqlangan WiFi bilan)'),
+            ),
+            const SizedBox(height: 16),
+
             Text(
-              'Yuborilgach ESP32 qayta ishga tushadi va serverdan '
-              'vaqtni olib keladi. ~10 soniyadan keyin qayta ulaning.',
+              'Eslatma: sinxronlashda ESP32 qayta ishga tushadi va Bluetooth '
+              'aloqasi uziladi. ~10 soniyadan keyin asosiy sahifadan qayta ulaning.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
