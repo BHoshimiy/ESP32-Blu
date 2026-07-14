@@ -1,0 +1,432 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+void main() => runApp(const Esp32AlarmApp());
+
+class Esp32AlarmApp extends StatelessWidget {
+  const Esp32AlarmApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'ESP32 Alarm',
+      theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
+      home: const HomePage(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  static const deviceName = 'ESP32-Alarm';
+
+  BluetoothConnection? _connection;
+  bool _connecting = false;
+  String _status = 'Ulanmagan';
+  String _deviceTime = '--:--:--.---';
+  String _rxBuf = '';
+  TimeOfDay _alarmTime = TimeOfDay.now();
+
+  final _ssidCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  final _secCtrl = TextEditingController(text: '0');
+  final _msCtrl = TextEditingController(text: '0');
+  final _delayCtrl = TextEditingController(text: '0');
+
+  bool get _connected => _connection?.isConnected ?? false;
+
+  // ---------- Bluetooth ----------
+
+  Future<void> _connect() async {
+    final statuses = await [
+      Permission.bluetoothConnect,
+      Permission.bluetoothScan,
+    ].request();
+
+    if (statuses[Permission.bluetoothConnect]?.isDenied ?? false) {
+      _setStatus('Bluetooth ruxsati berilmadi');
+      return;
+    }
+
+    setState(() {
+      _connecting = true;
+      _status = 'Ulanmoqda...';
+    });
+
+    try {
+      final bonded =
+          await FlutterBluetoothSerial.instance.getBondedDevices();
+      final device = bonded.where((d) => d.name == deviceName).firstOrNull;
+
+      if (device == null) {
+        _setStatus(
+            '$deviceName topilmadi. Avval telefon sozlamalarida pair qiling!');
+        setState(() => _connecting = false);
+        return;
+      }
+
+      final conn = await BluetoothConnection.toAddress(device.address);
+      _connection = conn;
+      _rxBuf = '';
+
+      // ESP32'dan kelayotgan ma'lumotlarni o'qish (real-time vaqt + javoblar)
+      conn.input?.listen(_onData, onDone: () {
+        _connection = null;
+        if (mounted) {
+          setState(() {
+            _status = 'Uzildi';
+            _deviceTime = '--:--:--.---';
+          });
+        }
+      });
+
+      _setStatus('Ulandi ✓');
+    } catch (e) {
+      _setStatus('Ulanib bo\'lmadi: $e');
+    } finally {
+      if (mounted) setState(() => _connecting = false);
+    }
+  }
+
+  void _onData(Uint8List data) {
+    _rxBuf += utf8.decode(data, allowMalformed: true);
+    while (true) {
+      final i = _rxBuf.indexOf('\n');
+      if (i < 0) break;
+      final line = _rxBuf.substring(0, i).trim();
+      _rxBuf = _rxBuf.substring(i + 1);
+      if (line.isNotEmpty) _handleLine(line);
+    }
+  }
+
+  void _handleLine(String line) {
+    if (!mounted) return;
+    if (line.startsWith('CT ')) {
+      // ESP32'ning joriy vaqti (har 100ms da keladi)
+      setState(() => _deviceTime = line.substring(3));
+    } else {
+      // Buyruq javoblari va xabarlar
+      setState(() => _status = line);
+    }
+  }
+
+  void _disconnect() {
+    _connection?.dispose();
+    _connection = null;
+    setState(() {
+      _status = 'Uzildi';
+      _deviceTime = '--:--:--.---';
+    });
+  }
+
+  void _sendRaw(String cmd) {
+    final conn = _connection;
+    if (conn == null || !conn.isConnected) {
+      _setStatus('Avval ulaning');
+      return;
+    }
+    conn.output.add(Uint8List.fromList(utf8.encode('$cmd\n')));
+  }
+
+  void _sendAlarm() {
+    final sec = int.tryParse(_secCtrl.text.trim()) ?? -1;
+    final ms =
+        int.tryParse(_msCtrl.text.trim().isEmpty ? '0' : _msCtrl.text.trim()) ??
+            -1;
+
+    if (sec < 0 || sec > 59) {
+      _setStatus('Sekund 0-59 oralig\'ida bo\'lishi kerak');
+      return;
+    }
+    if (ms < 0 || ms > 999) {
+      _setStatus('Millisekund 0-999 oralig\'ida bo\'lishi kerak');
+      return;
+    }
+
+    final timeStr =
+        '${_two(_alarmTime.hour)}:${_two(_alarmTime.minute)}:${_two(sec)}.${ms.toString().padLeft(3, '0')}';
+    _sendRaw('A $timeStr');
+    _setStatus('Alarm yuborildi: $timeStr');
+  }
+
+  void _sendStop() {
+    _sendRaw('STOP');
+    _setStatus('STOP yuborildi');
+  }
+
+  void _sendDelay() {
+    final txt = _delayCtrl.text.trim();
+    final ms = int.tryParse(txt.isEmpty ? '0' : txt) ?? -1;
+    if (ms < 0 || ms > 999) {
+      _setStatus('Delay 0-999 ms oralig\'ida bo\'lishi kerak');
+      return;
+    }
+    _sendRaw('D $ms');
+    _setStatus('Delay yuborildi: $ms ms');
+  }
+
+  void _sendWifi() {
+    final ssid = _ssidCtrl.text.trim();
+    final pass = _passCtrl.text.trim();
+    if (ssid.isEmpty) {
+      _setStatus('WiFi nomini kiriting');
+      return;
+    }
+    if (ssid.contains(';')) {
+      _setStatus('WiFi nomida ";" belgisi bo\'lmasligi kerak');
+      return;
+    }
+    _sendRaw('W $ssid;$pass');
+    _setStatus(
+        'WiFi yuborildi. ESP32 qayta ishga tushadi — 10 soniyadan keyin qayta ulaning.');
+  }
+
+  // ---------- Yordamchi ----------
+
+  String _two(int n) => n.toString().padLeft(2, '0');
+
+  void _setStatus(String s) {
+    if (mounted) setState(() => _status = s);
+  }
+
+  Future<void> _pickTime() async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _alarmTime,
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      ),
+    );
+    if (picked != null) setState(() => _alarmTime = picked);
+  }
+
+  @override
+  void dispose() {
+    _connection?.dispose();
+    _ssidCtrl.dispose();
+    _passCtrl.dispose();
+    _secCtrl.dispose();
+    _msCtrl.dispose();
+    _delayCtrl.dispose();
+    super.dispose();
+  }
+
+  // ---------- UI ----------
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('ESP32 Alarm')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // ESP32 joriy vaqti (real-time)
+            Card(
+              color: Theme.of(context).colorScheme.primaryContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Text('ESP32 joriy vaqti',
+                        style: Theme.of(context).textTheme.labelMedium),
+                    const SizedBox(height: 4),
+                    Text(
+                      _deviceTime,
+                      style: const TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // Holat
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Icon(
+                      _connected
+                          ? Icons.bluetooth_connected
+                          : Icons.bluetooth_disabled,
+                      color: _connected ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(child: Text(_status)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Ulanish / Uzish
+            FilledButton.icon(
+              onPressed: _connecting
+                  ? null
+                  : (_connected ? _disconnect : _connect),
+              icon: Icon(_connected ? Icons.link_off : Icons.link),
+              label: Text(_connecting
+                  ? 'Ulanmoqda...'
+                  : (_connected ? 'Uzish' : 'Ulanish')),
+            ),
+            const SizedBox(height: 32),
+
+            // Alarm vaqti
+            Text('Alarm vaqti:',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _pickTime,
+              icon: const Icon(Icons.access_time),
+              label: Text(
+                '${_two(_alarmTime.hour)}:${_two(_alarmTime.minute)}',
+                style: const TextStyle(fontSize: 24),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // Sekund va millisekund
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _secCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Sekund (0-59)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _msCtrl,
+                    keyboardType: TextInputType.number,
+                    maxLength: 3,
+                    decoration: const InputDecoration(
+                      labelText: 'Millisekund (0-999)',
+                      border: OutlineInputBorder(),
+                      counterText: '',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Masalan: 500 = yarim sekund',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+
+            FilledButton.icon(
+              onPressed: _connected ? _sendAlarm : null,
+              icon: const Icon(Icons.alarm_add),
+              label: const Text('Alarm yuborish'),
+            ),
+            const SizedBox(height: 12),
+
+            OutlinedButton.icon(
+              onPressed: _connected ? _sendStop : null,
+              icon: const Icon(Icons.stop_circle_outlined),
+              label: const Text('STOP (alarmni o\'chirish)'),
+            ),
+            const SizedBox(height: 24),
+
+            // Delay kompensatsiya
+            Text('Delay (kompensatsiya):',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _delayCtrl,
+                    keyboardType: TextInputType.number,
+                    maxLength: 3,
+                    decoration: const InputDecoration(
+                      labelText: 'Delay (0-999 ms)',
+                      border: OutlineInputBorder(),
+                      counterText: '',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.tonalIcon(
+                  onPressed: _connected ? _sendDelay : null,
+                  icon: const Icon(Icons.speed),
+                  label: const Text('Yuborish'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Alarm shuncha millisekund OLDIN ishlaydi. '
+              'Masalan: 350 -> 21:29:59.890 + 0.350 >= 21:30:00.001 da signal.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 32),
+            const Divider(),
+            const SizedBox(height: 8),
+
+            // WiFi sozlamalari
+            Text('WiFi sozlamalari (ESP32 uchun):',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _ssidCtrl,
+              decoration: const InputDecoration(
+                labelText: 'WiFi nomi (SSID)',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.wifi),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _passCtrl,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'WiFi paroli',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.lock_outline),
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: _connected ? _sendWifi : null,
+              icon: const Icon(Icons.send),
+              label: const Text('WiFi ma\'lumotlarini yuborish'),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Yuborilgach ESP32 qayta ishga tushadi va serverdan '
+              'vaqtni olib keladi. ~10 soniyadan keyin qayta ulaning.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

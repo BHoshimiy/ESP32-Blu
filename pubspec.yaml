@@ -1,0 +1,19 @@
+name: esp32_alarm
+description: ESP32 ga Bluetooth orqali alarm vaqti yuboradigan ilova
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_bluetooth_serial: ^0.4.0
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
