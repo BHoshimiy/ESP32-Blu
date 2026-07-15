@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -36,6 +37,13 @@ class _HomePageState extends State<HomePage> {
   String _status = 'Ulanmagan';
   String _deviceTime = '--:--:--.---';
   String _rxBuf = '';
+
+  // ESP32'dan oxirgi kelgan vaqt (kun boshidan mikrosekundlarda) va
+  // shu paytdan beri o'tgan lokal vaqtni o'lchash uchun Stopwatch.
+  // ESP32 har 1 daqiqada CT yuboradi; oraliqda ilova o'zi hisoblaydi.
+  int? _baseUs;
+  final Stopwatch _sw = Stopwatch();
+  Timer? _ticker;
   TimeOfDay _alarmTime = TimeOfDay.now();
 
   final _ssidCtrl = TextEditingController();
@@ -82,6 +90,7 @@ class _HomePageState extends State<HomePage> {
 
       conn.input?.listen(_onData, onDone: () {
         _connection = null;
+        _stopTicker();
         if (mounted) {
           setState(() {
             _status = 'Uzildi';
@@ -112,15 +121,64 @@ class _HomePageState extends State<HomePage> {
   void _handleLine(String line) {
     if (!mounted) return;
     if (line.startsWith('CT ')) {
-      setState(() => _deviceTime = line.substring(3));
+      final us = _parseCt(line.substring(3));
+      if (us == null) {
+        // Sinxronlanmagan placeholder keldi
+        _stopTicker();
+        setState(() => _deviceTime = '--:--:--.---');
+      } else {
+        // Yangi anchor: shu paytdan boshlab lokal hisoblaymiz
+        _baseUs = us;
+        _sw
+          ..reset()
+          ..start();
+        _startTicker();
+        setState(() => _deviceTime = _fmtUs(us));
+      }
     } else {
       setState(() => _status = line);
     }
   }
 
+  // "HH:MM:SS.mmm" -> mikrosekund (kun boshidan), xato bo'lsa null
+  int? _parseCt(String s) {
+    final m = RegExp(r'^(\d{2}):(\d{2}):(\d{2})\.(\d{3})$')
+        .firstMatch(s.trim());
+    if (m == null) return null;
+    final h = int.parse(m.group(1)!);
+    final min = int.parse(m.group(2)!);
+    final sec = int.parse(m.group(3)!);
+    final ms = int.parse(m.group(4)!);
+    return ((h * 3600 + min * 60 + sec) * 1000 + ms) * 1000;
+  }
+
+  String _fmtUs(int us) {
+    final total = us % 86400000000;
+    final secs = total ~/ 1000000;
+    final ms = (total % 1000000) ~/ 1000;
+    return '${_two(secs ~/ 3600)}:${_two((secs % 3600) ~/ 60)}:${_two(secs % 60)}.${ms.toString().padLeft(3, '0')}';
+  }
+
+  void _startTicker() {
+    _ticker ??= Timer.periodic(const Duration(milliseconds: 33), (_) {
+      final base = _baseUs;
+      if (base == null || !mounted) return;
+      final now = base + _sw.elapsedMicroseconds;
+      setState(() => _deviceTime = _fmtUs(now));
+    });
+  }
+
+  void _stopTicker() {
+    _ticker?.cancel();
+    _ticker = null;
+    _sw.stop();
+    _baseUs = null;
+  }
+
   void _disconnect() {
     _connection?.dispose();
     _connection = null;
+    _stopTicker();
     setState(() {
       _status = 'Uzildi';
       _deviceTime = '--:--:--.---';
@@ -219,6 +277,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _ticker?.cancel();
     _connection?.dispose();
     _ssidCtrl.dispose();
     _passCtrl.dispose();
